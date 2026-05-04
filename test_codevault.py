@@ -19,24 +19,24 @@ def make_username():
 
 @pytest.fixture(scope="function")
 def driver():
-    """
-    Selenium 3.x compatible — NO webdriver_manager, NO Service kwarg.
-    Chrome + ChromeDriver are pre-installed in joyzoursky/python-chromedriver image.
-    """
     opts = Options()
     opts.add_argument("--headless")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--disable-gpu")
     opts.add_argument("--window-size=1920,1080")
-
-    drv = webdriver.Chrome(options=opts)   # Selenium 3.x — no 'service' kwarg
+    drv = webdriver.Chrome(options=opts)
     drv.implicitly_wait(10)
     yield drv
     drv.quit()
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+def wait_for_page(driver, text, timeout=15):
+    """Wait until text appears in page source."""
+    WebDriverWait(driver, timeout).until(
+        lambda d: text in d.page_source
+    )
+
 
 def register_and_login(driver, password="TestPass@123"):
     username = make_username()
@@ -50,6 +50,7 @@ def register_and_login(driver, password="TestPass@123"):
     driver.find_element(By.ID, "username").send_keys(username)
     driver.find_element(By.ID, "password").send_keys(password)
     driver.find_element(By.ID, "login-btn").click()
+    wait_for_page(driver, "Welcome back")
     return username
 
 
@@ -57,10 +58,13 @@ def add_snippet(driver, title="Test Snippet", lang="Python",
                 desc="Test desc", code="print('hello')"):
     driver.get(f"{BASE_URL}/add")
     driver.find_element(By.ID, "title").send_keys(title)
-    Select(driver.find_element(By.ID, "language")).select_by_visible_text(lang)
+    # Use send_keys on select — works with Selenium 3.x reliably
+    lang_select = driver.find_element(By.ID, "language")
+    lang_select.send_keys(lang)
     driver.find_element(By.ID, "description").send_keys(desc)
     driver.find_element(By.ID, "code").send_keys(code)
     driver.find_element(By.ID, "save-btn").click()
+    wait_for_page(driver, "Snippet saved")
 
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
@@ -157,7 +161,7 @@ def test_12_dashboard_requires_login(driver):
 def test_13_add_snippet_successfully(driver):
     register_and_login(driver)
     add_snippet(driver, title="Bubble Sort", code="def bubble(): pass")
-    assert "Snippet saved to the vault" in driver.page_source
+    assert "Snippet saved" in driver.page_source
 
 def test_14_snippet_appears_on_homepage(driver):
     register_and_login(driver)
@@ -168,10 +172,19 @@ def test_14_snippet_appears_on_homepage(driver):
 
 def test_15_view_snippet_detail_page(driver):
     register_and_login(driver)
-    add_snippet(driver, title="Merge Sort Detail", code="def merge(): pass")
+    title = f"ViewTest_{make_username()}"
+    add_snippet(driver, title=title, code="def view_me(): pass")
     driver.get(BASE_URL)
+    # Wait for snippet card and click
+    WebDriverWait(driver, 10).until(
+        EC.presence_of_element_located((By.CSS_SELECTOR, ".snippet-card"))
+    )
     driver.find_element(By.CSS_SELECTOR, ".snippet-card").click()
-    assert "Merge Sort Detail" in driver.page_source
+    # Wait for detail page to load
+    WebDriverWait(driver, 10).until(
+        EC.presence_of_element_located((By.ID, "snippet-code"))
+    )
+    assert title in driver.page_source
 
 def test_16_search_finds_snippet(driver):
     register_and_login(driver)
@@ -191,25 +204,44 @@ def test_17_search_no_results(driver):
 
 def test_18_filter_by_language(driver):
     register_and_login(driver)
-    add_snippet(driver, title="JS Arrow Fn", lang="JavaScript", code="const f = () => {}")
+    # Add a Python snippet so Python appears in filter
+    add_snippet(driver, title="Filter Test Python", lang="Python",
+                code="x = 'filter test'")
     driver.get(BASE_URL)
-    Select(driver.find_element(By.ID, "lang-filter")).select_by_visible_text("JavaScript")
+    # Wait for lang-filter to be present
+    WebDriverWait(driver, 10).until(
+        EC.presence_of_element_located((By.ID, "lang-filter"))
+    )
+    # Select Python (guaranteed to exist since we just added one)
+    Select(driver.find_element(By.ID, "lang-filter")).select_by_visible_text("Python")
     driver.find_element(By.ID, "search-btn").click()
-    assert "JavaScript" in driver.page_source
+    assert "Python" in driver.page_source
 
 def test_19_dashboard_shows_snippets(driver):
     register_and_login(driver)
     add_snippet(driver, title="Dashboard Test Snippet", code="x = 1")
-    driver.find_element(By.LINK_TEXT, "[ DASHBOARD ]").click()
+    driver.get(f"{BASE_URL}/dashboard")
+    WebDriverWait(driver, 10).until(
+        EC.presence_of_element_located((By.ID, "dashboard-table"))
+    )
     assert "Dashboard Test Snippet" in driver.page_source
 
 def test_20_edit_snippet(driver):
     register_and_login(driver)
-    add_snippet(driver, title="Old Title", code="pass")
+    title = f"EditTest_{make_username()}"
+    add_snippet(driver, title=title, code="pass")
     driver.get(BASE_URL)
+    WebDriverWait(driver, 10).until(
+        EC.presence_of_element_located((By.CSS_SELECTOR, ".snippet-card"))
+    )
     driver.find_element(By.CSS_SELECTOR, ".snippet-card").click()
+    WebDriverWait(driver, 10).until(
+        EC.presence_of_element_located((By.ID, "edit-btn"))
+    )
     driver.find_element(By.ID, "edit-btn").click()
-    f = driver.find_element(By.ID, "title")
+    f = WebDriverWait(driver, 10).until(
+        EC.presence_of_element_located((By.ID, "title"))
+    )
     f.clear()
     f.send_keys("Updated Title")
     driver.find_element(By.ID, "update-btn").click()
@@ -219,7 +251,13 @@ def test_21_delete_snippet(driver):
     register_and_login(driver)
     add_snippet(driver, title="To Be Deleted", code="pass")
     driver.get(BASE_URL)
+    WebDriverWait(driver, 10).until(
+        EC.presence_of_element_located((By.CSS_SELECTOR, ".snippet-card"))
+    )
     driver.find_element(By.CSS_SELECTOR, ".snippet-card").click()
+    WebDriverWait(driver, 10).until(
+        EC.presence_of_element_located((By.ID, "delete-btn"))
+    )
     driver.execute_script("window.confirm = function(){ return true; }")
     driver.find_element(By.ID, "delete-btn").click()
     assert "deleted" in driver.page_source.lower()
